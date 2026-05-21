@@ -7,6 +7,7 @@ Agent skills for the **dev-sec-ops** lab. Each skill is a `SKILL.md` package tha
 | Skill | Description |
 |-------|-------------|
 | **debug-jenkins** | Diagnose failed Jenkins builds using MCP tools, console logs, and pipeline context (`jenkins.tpinf.xyz`, `devsecops-demo-pipeline`, Trivy, Harbor, SonarQube). |
+| **kubernetes** | List Kubernetes pods in a namespace formatted as a markdown table and debug pods in CrashLoopBackOff using kube_mcp tools or kubectl commands. |
 | **new-service-deployment** | Scaffold a new service: Helm + Argo CD, or Kustomize + Argo CD, plus `static/` ingress and shared config for the dev-sec-ops repo. |
 
 Skill sources live under [`agent-skills/skills/`](agent-skills/skills/).
