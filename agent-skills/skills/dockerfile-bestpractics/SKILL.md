@@ -21,8 +21,9 @@ maintainability best practices. The five pillars are:
 5. **CVE verification** — base images checked against known vulnerabilities before finalising
 
 Before writing any Dockerfile, read the user's stack (language, framework, entrypoint) and
-apply the matching pattern from this skill. **Always run the CVE check (Step 3b) on every
-base image before producing the final Dockerfile**, for both new files and updates.
+apply the matching pattern from this skill. **Image selection and CVE checking form a loop —
+Steps 3 → 3b → 3c repeat until every image is clean or the safest possible alternative is confirmed.**
+Never output a Dockerfile until the loop completes with no CRITICAL/HIGH CVEs in the runtime stage.
 
 ---
 
@@ -100,10 +101,13 @@ See `references/multi-stage-patterns.md` for per-language examples (Go, Node, Py
 
 ---
 
-## Step 3 — Base Image Selection
+## Step 3 — Base Image Selection (Candidate Pick)
 
-### Build Stage
-| Language | Recommended Build Base |
+> **This step selects a candidate image only.** The image is not final until it passes
+> Step 3b (CVE check) and Step 3c (upgrade loop) with zero CRITICAL/HIGH CVEs in the runtime stage.
+
+### Build Stage candidates
+| Language | Candidate Build Base |
 |---|---|
 | Go | `golang:1.22-bookworm` |
 | Node.js | `node:20-bookworm` |
@@ -113,15 +117,18 @@ See `references/multi-stage-patterns.md` for per-language examples (Go, Node, Py
 
 Always pin to a **minor version tag** (e.g. `node:20-bookworm`, not `node:latest` or `node:20`).
 
-### Runtime Stage (choose one per use case)
-| Base | When to Use | Approx Size |
-|---|---|---|
-| `gcr.io/distroless/static-debian12` | Static Go / Rust binaries | ~2 MB |
-| `gcr.io/distroless/base-debian12` | Needs glibc, no shell | ~20 MB |
-| `gcr.io/distroless/nodejs20-debian12` | Node.js apps | ~100 MB |
-| `gcr.io/distroless/java21-debian12` | JVM apps | ~220 MB |
-| `python:3.12-slim-bookworm` | Python apps needing pip at runtime | ~130 MB |
-| `alpine:3.19` | Needs a shell + musl is acceptable | ~7 MB |
+### Runtime Stage candidates — ordered from most to least preferred
+Each row is a fallback to try in sequence during Step 3c if the preferred image fails CVE check.
+
+| Priority | Base | When to Use | Approx Size |
+|---|---|---|---|
+| 1st | `gcr.io/distroless/static-debian12` | Static Go / Rust binaries | ~2 MB |
+| 1st | `gcr.io/distroless/base-debian12` | Needs glibc, no shell | ~20 MB |
+| 1st | `gcr.io/distroless/nodejs20-debian12` | Node.js apps | ~100 MB |
+| 1st | `gcr.io/distroless/java21-debian12` | JVM apps | ~220 MB |
+| 2nd | `python:3.12-slim-bookworm` | Python needing pip at runtime | ~130 MB |
+| 2nd | `alpine:3.19` | Needs shell + musl acceptable | ~7 MB |
+| 3rd | `debian:12-slim` | Needs apt + shell, no distroless option | ~30 MB |
 
 **Never use** `ubuntu:latest`, `debian:latest`, or `*:latest` in production — tags are mutable.
 
@@ -190,12 +197,12 @@ See `references/cve-check.md` §Matching for the full image→OS mapping table a
 
 | Finding | Action |
 |---|---|
-| CRITICAL CVE in runtime base image | 🚫 **Block** — do not use. Propose nearest safe alternative. |
-| HIGH CVE in runtime base image | 🚫 **Block** — do not use. Propose alternative, explain the CVE. |
-| CRITICAL/HIGH only in build stage image | ⚠️ **Warn** — build stage is discarded; note but proceed. |
-| MEDIUM CVE | ⚠️ **Warn** — list it, proceed, recommend monitoring for patch. |
-| No CVEs found | ✅ **Clear** — state "No CRITICAL/HIGH CVEs found for `<image:tag>`" in output. |
-| URL fetch failed + no fallback data | ⚠️ **Warn** — state fetch failed, list image as unverified, proceed with caution. |
+| CRITICAL CVE in runtime base image | 🚫 **Trigger Step 3c** — select next candidate from the upgrade ladder and re-check. |
+| HIGH CVE in runtime base image | 🚫 **Trigger Step 3c** — select next candidate from the upgrade ladder and re-check. |
+| CRITICAL/HIGH only in build stage image | ⚠️ **Warn** — build stage is discarded at runtime; note it, do NOT trigger 3c for runtime. |
+| MEDIUM CVE | ⚠️ **Warn** — list it, proceed to output, recommend monitoring for patch. |
+| No CVEs found | ✅ **Clear** — image is confirmed. Proceed to output. |
+| URL fetch failed + no fallback data | ⚠️ **Warn** — mark image as unverified, note it in output, proceed. |
 
 ### Safe alternative suggestions when blocked
 
@@ -229,6 +236,83 @@ If the user-provided URL fetch failed, state:
 
 See `references/cve-check.md` for: URL source parsing details, JSON/CSV file schemas,
 NVD API parameters, schema auto-detection, and image→OS mapping table.
+
+---
+
+## Step 3c — Image Upgrade Loop
+
+This step runs **only when Step 3b returns CRITICAL or HIGH CVEs for a runtime stage image.**
+It replaces the failing image with the next best candidate and re-runs Step 3b until the image
+is clean or the ladder is exhausted.
+
+### Upgrade ladder (runtime stage)
+
+Work down this list in order. Skip tiers that don't fit the language/runtime requirements.
+
+```
+Tier 1 — Distroless (no shell, minimal OS, lowest CVE surface)
+  gcr.io/distroless/static-debian12      ← static binaries (Go CGO_ENABLED=0, Rust musl)
+  gcr.io/distroless/base-debian12        ← dynamic binaries needing glibc
+  gcr.io/distroless/nodejs20-debian12    ← Node.js
+  gcr.io/distroless/java21-debian12      ← JVM
+  gcr.io/distroless/python3-debian12     ← Python (no pip at runtime)
+
+Tier 2 — Slim / Alpine (shell present, small package set)
+  python:3.12-slim-bookworm
+  node:20-slim
+  alpine:3.19
+
+Tier 3 — Minimal full OS (last resort, justify in output)
+  debian:12-slim
+  ubuntu:24.04-minimal
+```
+
+### Loop algorithm
+
+```
+candidate = initial image from Step 3
+
+LOOP:
+  run Step 3b CVE check on candidate
+  if CRITICAL or HIGH in runtime stage:
+    next_candidate = next image down the upgrade ladder for this language
+    if no next_candidate exists:
+      → STOP: output a warning that no CVE-clean image was found
+      → Use the cleanest candidate found (fewest CRITICAL), document it clearly
+      → Ask user to confirm before proceeding
+    else:
+      candidate = next_candidate
+      continue LOOP
+  else:
+    → CONFIRMED: use this image, proceed to Step 4
+```
+
+### Loop exit conditions
+
+| Condition | Outcome |
+|---|---|
+| Image passes CVE check (0 CRITICAL, 0 HIGH in runtime) | ✅ Confirmed — use this image |
+| Reached Tier 3 and still has CVEs | ⚠️ Use least-bad option, warn user, ask to confirm |
+| All candidates exhausted | 🚫 Halt — report to user, do not produce Dockerfile until user decides |
+
+### Upgrade loop output block
+
+After the loop completes, show the full upgrade trail so the user understands every substitution:
+
+```
+## Image Upgrade Trail
+| Stage | Candidate Tried | CRITICAL | HIGH | Outcome |
+|---|---|---|---|---|
+| runtime | node:20-bookworm | 4 | 7 | 🚫 Replaced |
+| runtime | node:20-slim | 0 | 2 | 🚫 Replaced |
+| runtime | distroless/nodejs20-debian12 | 0 | 0 | ✅ Confirmed |
+```
+
+If the build stage image also has CVEs, apply the same ladder for build images:
+```
+golang:1.22-bookworm → golang:1.22-alpine → (report if still failing)
+```
+But remember: build stage CVEs are lower priority — they are not present in the shipped image.
 
 ---
 
@@ -353,19 +437,21 @@ docker-compose*
 
 When producing a Dockerfile:
 1. If Go was defaulted, state at the top: `> ℹ️ No language specified — using Go as the default backend language.`
-2. **Show the CVE Check Results table** (Step 3b) — always, even when all images are clear.
-3. If any image was blocked and replaced, show the 🚫 block notice before the Dockerfile.
-4. Show the complete Dockerfile with inline comments explaining each decision.
-5. Show the matching `.dockerignore`.
-6. Show the `docker build` command (including any `--secret` flags needed).
-7. Call out any other assumptions made about the user's stack.
-8. Note any trade-offs (e.g. alpine vs distroless).
+2. **Show the Image Upgrade Trail table** (Step 3c) — always, even if only one candidate was tried.
+3. **Show the CVE Check Results table** (Step 3b) — final confirmed images only.
+4. If any image went through substitution, show the 🚫 block notice before the Dockerfile.
+5. Show the complete Dockerfile using only CVE-confirmed images.
+6. Show the matching `.dockerignore`.
+7. Show the `docker build` command (including any `--secret` flags needed).
+8. Call out any other assumptions made about the user's stack.
+9. Note any trade-offs (e.g. why distroless was chosen over slim).
 
 When updating an existing Dockerfile:
 1. List issues found under each of the five pillars (including CVE findings).
-2. Show the CVE Check Results table for all images — old and new.
-3. Provide the rewritten Dockerfile.
-4. Summarize what changed and why.
+2. Show the Image Upgrade Trail for every image that was changed.
+3. Show the CVE Check Results table for all final confirmed images.
+4. Provide the rewritten Dockerfile.
+5. Summarize what changed and why.
 
 ---
 
