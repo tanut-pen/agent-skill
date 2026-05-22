@@ -1,45 +1,61 @@
 ---
 name: dockerfile-best-practices
 description: >
-  Use this skill whenever the user asks to create, write, review, fix, or optimize a Dockerfile,
-  container image, or Docker-related configuration. Triggers include: "write a Dockerfile",
-  "containerize my app", "Docker multi-stage", "Docker best practices", "reduce image size",
-  "Docker secrets", "secure Dockerfile", "Docker base image", "production Dockerfile",
-  or any request involving building container images. Also trigger when the user uploads
-  or pastes a Dockerfile and asks for improvements, security review, or optimization.
-  Always use this skill for any Docker image authoring task — even simple ones, as
-  best practices around secrets, base images, and build stages are easy to get wrong.
+  Use this skill ONLY when the user explicitly wants to CREATE a new Dockerfile or UPDATE/EDIT
+  an existing one. Triggers: "write a Dockerfile", "create a Dockerfile", "add a Dockerfile",
+  "update my Dockerfile", "edit the Dockerfile", "containerize my app", "make it production-ready".
+  DO NOT trigger for general Docker questions, explaining concepts, reviewing without changing,
+  or tasks unrelated to authoring a Dockerfile file. When the user asks to create a new backend
+  service without specifying a language, default to Go as the implementation language.
 ---
 
 # Dockerfile Best Practices Skill
 
 This skill produces production-grade Dockerfiles following modern security, efficiency, and
-maintainability best practices. The four pillars are:
+maintainability best practices. The five pillars are:
 
 1. **Multi-stage builds** — separate build and runtime environments
 2. **No secrets in layers** — zero credentials baked into images
 3. **Proper base image selection** — right image for build vs runtime
 4. **Minimal, hardened runtime** — least-privilege, small attack surface
+5. **CVE verification** — base images checked against known vulnerabilities before finalising
 
 Before writing any Dockerfile, read the user's stack (language, framework, entrypoint) and
-apply the matching pattern from this skill. When reviewing an existing Dockerfile, check
-all four pillars and report findings before rewriting.
+apply the matching pattern from this skill. **Always run the CVE check (Step 3b) on every
+base image before producing the final Dockerfile**, for both new files and updates.
 
 ---
 
 ## Step 1 — Identify the Stack
 
+### Default Language Rule
+> **If the user is creating a new backend service and has NOT specified a language, default to Go.**
+> State the assumption explicitly: *"No language specified — defaulting to Go for the backend."*
+> Do not ask for confirmation; proceed with the Go pattern and note it at the top of the output.
+
 Ask (or infer from context) the following before writing:
 
 | Question | Why It Matters |
 |---|---|
-| Language / runtime? | Determines base image family |
+| Language / runtime? | Determines base image family — **Go if unspecified** |
 | Build toolchain needed? | Determines build stage image |
 | Does the app need a shell at runtime? | Distroless vs slim vs alpine |
 | Any secrets needed at build time? | Must use BuildKit secret mounts |
 | Target platform? | `linux/amd64`, `linux/arm64`, or multi-arch |
 
 If the user has already provided a codebase or existing Dockerfile, extract answers from it.
+
+### Trigger Scope (when to apply this skill)
+
+| Situation | Apply skill? |
+|---|---|
+| "Write me a Dockerfile" | ✅ Yes |
+| "Create a Dockerfile for my new service" | ✅ Yes |
+| "Update/fix my existing Dockerfile" | ✅ Yes |
+| "Containerize this app" | ✅ Yes |
+| "How does multi-stage build work?" | ❌ No — answer conversationally |
+| "Review my Dockerfile and tell me issues" (no edit requested) | ❌ No — answer conversationally |
+| "What base image should I use?" | ❌ No — answer conversationally |
 
 ---
 
@@ -111,6 +127,108 @@ Always pin to a **minor version tag** (e.g. `node:20-bookworm`, not `node:latest
 
 See `references/base-image-guide.md` for detailed trade-offs, CVE scanning tips, and
 multi-arch considerations.
+
+---
+
+## Step 3b — CVE Check on Base Images
+
+> **This step is mandatory for every Dockerfile created or updated by this skill.**
+> Run it on ALL `FROM` images — both build stage and runtime stage — before writing the final output.
+
+### CVE source priority (check in this order)
+
+**1. User-provided URL (primary source)**
+If the user has supplied a URL in the current conversation (e.g. NVD query, Trivy DB export,
+Docker Hub advisory page, internal security portal), **always fetch that URL first** using
+`web_fetch`. Do not fall back to other sources unless the URL fetch fails or returns no data
+for the target image.
+
+```
+web_fetch: <url provided by user>
+```
+
+Supported URL types and what to expect from each — read `references/cve-check.md` §URL Sources
+for full parsing details:
+
+| URL pattern | Format returned |
+|---|---|
+| `https://nvd.nist.gov/vuln/search/results?*` | HTML — parse CVE IDs + severity badges |
+| `https://services.nvd.nist.gov/rest/json/cves/2.0?*` | JSON — `vulnerabilities[].cve` objects |
+| `https://hub.docker.com/r/*/tags*` | HTML — vulnerability count badges per tag |
+| Trivy DB export (e.g. `trivy-db.json`, GitHub release asset) | JSON — Trivy schema |
+| Internal/custom URL returning JSON | JSON — detect schema, see §Schema Detection |
+| Any other HTML advisory page | HTML — extract CVE IDs + severity by pattern |
+
+After fetching, extract CVEs relevant to the target image's OS/package set.
+If the URL returns data for multiple images or packages, filter to the base image being checked.
+
+**2. Automatic NVD API fallback (if no URL provided or URL fetch fails)**
+```
+web_fetch: https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=<image-name>&cvssV3Severity=CRITICAL
+web_fetch: https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=<image-name>&cvssV3Severity=HIGH
+```
+
+**3. Docker Hub tag security page (supplement)**
+```
+web_fetch: https://hub.docker.com/r/library/<image>/tags
+```
+
+**4. User-uploaded file (if present in context)**
+If the user has uploaded a JSON/CSV file alongside the request, parse it per
+`references/cve-check.md` §File Schemas.
+
+### Matching CVEs to the base image
+
+- Map the image tag to its OS/distro (e.g. `node:20-bookworm` → Debian 12, `alpine:3.19` → musl).
+- From the fetched data, keep only CVEs whose affected package/OS matches.
+- Severity filter: surface **CRITICAL** and **HIGH** by default; include **MEDIUM** only if
+  the user asks or if no CRITICAL/HIGH are found.
+
+See `references/cve-check.md` §Matching for the full image→OS mapping table and filter logic.
+
+### Decision table
+
+| Finding | Action |
+|---|---|
+| CRITICAL CVE in runtime base image | 🚫 **Block** — do not use. Propose nearest safe alternative. |
+| HIGH CVE in runtime base image | 🚫 **Block** — do not use. Propose alternative, explain the CVE. |
+| CRITICAL/HIGH only in build stage image | ⚠️ **Warn** — build stage is discarded; note but proceed. |
+| MEDIUM CVE | ⚠️ **Warn** — list it, proceed, recommend monitoring for patch. |
+| No CVEs found | ✅ **Clear** — state "No CRITICAL/HIGH CVEs found for `<image:tag>`" in output. |
+| URL fetch failed + no fallback data | ⚠️ **Warn** — state fetch failed, list image as unverified, proceed with caution. |
+
+### Safe alternative suggestions when blocked
+
+| Blocked image | Suggested alternative |
+|---|---|
+| `ubuntu:*` or `debian:*` (latest/unpinned) | Pin to `debian:12-slim` + re-verify |
+| `node:<version>` (full image) | `node:<version>-slim` or `distroless/nodejs<version>-debian12` |
+| `python:<version>` (full image) | `python:<version>-slim-bookworm` |
+| `alpine:<old version>` | `alpine:3.19` (latest stable) |
+| Any image with shell + CRITICAL CVE | `gcr.io/distroless/*` equivalent |
+
+### CVE check output block (always include in final response)
+
+```
+## CVE Check Results
+| Image | Stage | CRITICAL | HIGH | MEDIUM | Status | Source |
+|---|---|---|---|---|---|---|
+| golang:1.22-bookworm | builder | 0 | 1 | 3 | ⚠️ WARN (build-only) | nvd.nist.gov |
+| gcr.io/distroless/static-debian12 | runtime | 0 | 0 | 0 | ✅ CLEAR | hub.docker.com |
+```
+
+If an image is blocked, prepend this notice before the Dockerfile:
+```
+> 🚫 Blocked: <image> — CVE-XXXX-XXXXX (CRITICAL): <short description>. Replaced with <alternative>.
+```
+
+If the user-provided URL fetch failed, state:
+```
+> ⚠️ CVE URL fetch failed for <url>. Fell back to NVD API. Results may be incomplete.
+```
+
+See `references/cve-check.md` for: URL source parsing details, JSON/CSV file schemas,
+NVD API parameters, schema auto-detection, and image→OS mapping table.
 
 ---
 
@@ -234,16 +352,20 @@ docker-compose*
 ## Output Format
 
 When producing a Dockerfile:
-1. Show the complete Dockerfile with inline comments explaining each decision.
-2. Show the matching `.dockerignore`.
-3. Show the `docker build` command (including any `--secret` flags needed).
-4. Call out any assumptions made about the user's stack.
-5. Note any trade-offs (e.g. alpine vs distroless).
+1. If Go was defaulted, state at the top: `> ℹ️ No language specified — using Go as the default backend language.`
+2. **Show the CVE Check Results table** (Step 3b) — always, even when all images are clear.
+3. If any image was blocked and replaced, show the 🚫 block notice before the Dockerfile.
+4. Show the complete Dockerfile with inline comments explaining each decision.
+5. Show the matching `.dockerignore`.
+6. Show the `docker build` command (including any `--secret` flags needed).
+7. Call out any other assumptions made about the user's stack.
+8. Note any trade-offs (e.g. alpine vs distroless).
 
-When reviewing an existing Dockerfile:
-1. List issues found under each of the four pillars.
-2. Provide the rewritten Dockerfile.
-3. Summarize what changed and why.
+When updating an existing Dockerfile:
+1. List issues found under each of the five pillars (including CVE findings).
+2. Show the CVE Check Results table for all images — old and new.
+3. Provide the rewritten Dockerfile.
+4. Summarize what changed and why.
 
 ---
 
@@ -256,3 +378,4 @@ Load these when you need more depth:
 | `references/multi-stage-patterns.md` | Writing multi-stage builds for a specific language |
 | `references/base-image-guide.md` | Choosing or justifying a base image |
 | `references/secrets-guide.md` | Any build-time or runtime secret handling |
+| `references/cve-check.md` | CVE document schemas, NVD API, Trivy/Grype integration, Docker Scout |
