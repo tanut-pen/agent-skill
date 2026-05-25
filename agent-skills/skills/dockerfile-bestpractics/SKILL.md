@@ -110,7 +110,7 @@ See `references/multi-stage-patterns.md` for per-language examples (Go, Node, Py
 ### Build Stage candidates
 | Language | Candidate Build Base |
 |---|---|
-| Go | `golang:1.22-bookworm` |
+| Go | `golang:1.22-alpine` |
 | Node.js | `node:20-bookworm` |
 | Python | `python:3.12-bookworm` |
 | Java | `eclipse-temurin:21-jdk-jammy` |
@@ -123,13 +123,13 @@ Each row is a fallback to try in sequence during Step 3c if the preferred image 
 
 | Priority | Base | When to Use | Approx Size |
 |---|---|---|---|
-| 1st | `gcr.io/distroless/static-debian12` | Static Go / Rust binaries | ~2 MB |
-| 1st | `gcr.io/distroless/base-debian12` | Needs glibc, no shell | ~20 MB |
-| 1st | `gcr.io/distroless/nodejs20-debian12` | Node.js apps | ~100 MB |
-| 1st | `gcr.io/distroless/java21-debian12` | JVM apps | ~220 MB |
+| 1st (Go/Rust) | `alpine:3.19` | **Go and Rust** — default runtime, musl-compatible | ~7 MB |
+| 1st (others) | `gcr.io/distroless/static-debian12` | Static binaries, non-Go/Rust | ~2 MB |
+| 1st (others) | `gcr.io/distroless/base-debian12` | Needs glibc, no shell | ~20 MB |
+| 1st (others) | `gcr.io/distroless/nodejs20-debian12` | Node.js apps | ~100 MB |
+| 1st (others) | `gcr.io/distroless/java21-debian12` | JVM apps | ~220 MB |
 | 2nd | `python:3.12-slim-bookworm` | Python needing pip at runtime | ~130 MB |
-| 2nd | `alpine:3.19` | Needs shell + musl acceptable | ~7 MB |
-| 3rd | `debian:12-slim` | Needs apt + shell, no distroless option | ~30 MB |
+| 3rd | `debian:12-slim` | Needs apt + shell, no better option | ~30 MB |
 
 **Never use** `ubuntu:latest`, `debian:latest`, or `*:latest` in production — tags are mutable.
 

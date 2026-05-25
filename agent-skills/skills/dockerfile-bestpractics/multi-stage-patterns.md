@@ -4,7 +4,7 @@
 
 ```dockerfile
 # syntax=docker/dockerfile:1.6
-FROM golang:1.22-bookworm AS builder
+FROM golang:1.22-alpine AS builder
 WORKDIR /app
 
 # Download deps first (cached unless go.mod/go.sum change)
@@ -12,21 +12,27 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+# CGO_ENABLED=0 + musl (alpine) = fully static binary, no external libc needed
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/server ./cmd/server
 
-# ── Static binary → distroless/static ──────────────────────────────
-FROM gcr.io/distroless/static-debian12 AS runtime
-COPY --from=builder /app/server /server
-USER nonroot:nonroot
+# ── Runtime: alpine — minimal shell, musl, ~7 MB ───────────────────
+FROM alpine:3.19 AS runtime
+# ca-certificates: required for HTTPS calls; tzdata: timezone support
+RUN apk add --no-cache ca-certificates tzdata
+RUN addgroup -S app && adduser -S -G app app
+USER app
+COPY --from=builder /app/server /app/server
 EXPOSE 8080
-ENTRYPOINT ["/server"]
+ENTRYPOINT ["/app/server"]
 ```
 
 **Notes:**
-- `CGO_ENABLED=0` produces a fully static binary — no glibc needed at runtime.
-- `-ldflags="-s -w"` strips debug info (~30% smaller).
-- `distroless/static` has no shell, no package manager, minimal CVE surface.
-- If CGO is needed, use `distroless/base-debian12` instead.
+- Builder uses `golang:1.22-alpine` — Go toolchain on Alpine/musl, smaller than bookworm (~300 MB vs ~800 MB).
+- `CGO_ENABLED=0` with musl produces a static binary that runs on bare Alpine with no extra libs.
+- `-ldflags="-s -w"` strips debug info (~30% smaller binary).
+- Runtime uses `alpine:3.19` — shell available for debugging, ~7 MB base, actively patched.
+- `ca-certificates` is needed for any outbound HTTPS; omit if the binary makes no external calls.
+- If CGO is required (e.g. SQLite, cgo bindings), keep `CGO_ENABLED=1` and add `gcc musl-dev` to the builder stage only.
 
 ---
 
