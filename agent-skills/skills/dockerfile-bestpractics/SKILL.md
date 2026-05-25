@@ -18,11 +18,12 @@ maintainability best practices. The five pillars are:
 2. **No secrets in layers** — zero credentials baked into images
 3. **Proper base image selection** — right image for build vs runtime
 4. **Minimal, hardened runtime** — least-privilege, small attack surface
-5. **CVE verification** — base images checked against known vulnerabilities before finalising
+5. **CVE verification** — Trivy scan run on every candidate image; loop upgrades until clean
 
 Before writing any Dockerfile, read the user's stack (language, framework, entrypoint) and
 apply the matching pattern from this skill. **Image selection and CVE checking form a loop —
-Steps 3 → 3b → 3c repeat until every image is clean or the safest possible alternative is confirmed.**
+Steps 3 → 3b → 3c → 3d repeat until every image is clean or the safest possible alternative is confirmed.**
+Trivy is run on every candidate image via bash. The raw Trivy scan result is always shown to the user.
 Never output a Dockerfile until the loop completes with no CRITICAL/HIGH CVEs in the runtime stage.
 
 ---
@@ -195,14 +196,17 @@ See `references/cve-check.md` §Matching for the full image→OS mapping table a
 
 ### Decision table
 
-| Finding | Action |
+> Step 3b feeds into **Step 3d (Trivy scan)** which produces the authoritative verdict.
+> Step 3b URL/web data is used to pre-screen; Trivy is the final word.
+
+| Finding (from Step 3d Trivy result) | Action |
 |---|---|
-| CRITICAL CVE in runtime base image | 🚫 **Trigger Step 3c** — select next candidate from the upgrade ladder and re-check. |
-| HIGH CVE in runtime base image | 🚫 **Trigger Step 3c** — select next candidate from the upgrade ladder and re-check. |
-| CRITICAL/HIGH only in build stage image | ⚠️ **Warn** — build stage is discarded at runtime; note it, do NOT trigger 3c for runtime. |
+| CRITICAL CVE in runtime base image | 🚫 **Trigger Step 3c** — select next candidate from the upgrade ladder, re-run Step 3d. |
+| HIGH CVE in runtime base image | 🚫 **Trigger Step 3c** — select next candidate from the upgrade ladder, re-run Step 3d. |
+| CRITICAL/HIGH only in build stage image | ⚠️ **Warn** — build stage discarded at runtime; note it, do NOT trigger 3c for runtime. |
 | MEDIUM CVE | ⚠️ **Warn** — list it, proceed to output, recommend monitoring for patch. |
-| No CVEs found | ✅ **Clear** — image is confirmed. Proceed to output. |
-| URL fetch failed + no fallback data | ⚠️ **Warn** — mark image as unverified, note it in output, proceed. |
+| No CVEs found | ✅ **Clear** — image confirmed. Proceed to output. |
+| Trivy not installed + URL fetch failed | ⚠️ **Warn** — mark image as unverified, note it, proceed with caution. |
 
 ### Safe alternative suggestions when blocked
 
@@ -273,8 +277,8 @@ Tier 3 — Minimal full OS (last resort, justify in output)
 candidate = initial image from Step 3
 
 LOOP:
-  run Step 3b CVE check on candidate
-  if CRITICAL or HIGH in runtime stage:
+  run Step 3d — Trivy scan on candidate        ← actual scan via bash
+  if CRITICAL > 0 or HIGH > 0 in runtime stage:
     next_candidate = next image down the upgrade ladder for this language
     if no next_candidate exists:
       → STOP: output a warning that no CVE-clean image was found
@@ -313,6 +317,102 @@ If the build stage image also has CVEs, apply the same ladder for build images:
 golang:1.22-bookworm → golang:1.22-alpine → (report if still failing)
 ```
 But remember: build stage CVEs are lower priority — they are not present in the shipped image.
+
+---
+
+## Step 3d — Trivy Scan (Mandatory)
+
+> **Run Trivy on every candidate image via bash_tool. This is not optional.**
+> Trivy output is always shown to the user in full, even when the image is clean.
+> This step replaces web-search CVE data as the authoritative source of truth.
+
+### Install Trivy if not present
+
+```bash
+# Check if Trivy is available
+which trivy || (
+  curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+)
+trivy --version
+```
+
+### Run Trivy against the candidate image
+
+Always run with these exact flags — table format for display, JSON for parsing:
+
+```bash
+# 1. Pull the image first to ensure latest digest
+docker pull <candidate-image>
+
+# 2. Table output — shown directly to user
+trivy image   --severity CRITICAL,HIGH,MEDIUM   --ignore-unfixed   <candidate-image>
+
+# 3. JSON output — parsed to drive the upgrade loop decision
+trivy image   --severity CRITICAL,HIGH,MEDIUM   --ignore-unfixed   --format json   --output /tmp/trivy-result.json   <candidate-image>
+
+# 4. Print counts for decision
+echo "--- Trivy summary ---"
+cat /tmp/trivy-result.json | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+critical = high = medium = 0
+for r in data.get('Results', []):
+    for v in r.get('Vulnerabilities') or []:
+        s = v.get('Severity','')
+        if s == 'CRITICAL': critical += 1
+        elif s == 'HIGH': high += 1
+        elif s == 'MEDIUM': medium += 1
+print(f'CRITICAL={critical} HIGH={high} MEDIUM={medium}')
+sys.exit(1 if critical > 0 or high > 0 else 0)
+"
+```
+
+### Decision from Trivy output
+
+Read the summary counts from the JSON parse above:
+
+| Trivy result | Next action |
+|---|---|
+| `CRITICAL=0 HIGH=0` | ✅ Image confirmed — proceed to Step 4 |
+| `CRITICAL>0` or `HIGH>0` | 🚫 Trigger Step 3c — pick next candidate, re-run Step 3d |
+| Trivy exits non-zero (pull failed, scan error) | ⚠️ Note the error, fall back to Step 3b web data, warn user |
+
+### Trivy output display rules
+
+**Always show the raw Trivy table output to the user**, formatted as a code block:
+
+```
+## Trivy Scan — <image:tag>
+\`\`\`
+<raw trivy table output here>
+\`\`\`
+CRITICAL: N  HIGH: N  MEDIUM: N  → ✅ CLEAR / 🚫 BLOCKED
+```
+
+Show this block for **every candidate tried** in the upgrade loop — not just the final one.
+If the loop tries three images, the user sees three Trivy scan blocks in the response.
+
+### Trivy scan in the upgrade loop
+
+The full loop with Trivy integrated:
+
+```
+candidate = initial image from Step 3
+
+LOOP:
+  bash: docker pull candidate
+  bash: trivy image --severity CRITICAL,HIGH,MEDIUM --ignore-unfixed candidate   ← show to user
+  bash: trivy image --format json → parse counts
+  if CRITICAL > 0 or HIGH > 0:
+    show Trivy block with 🚫 BLOCKED label
+    next_candidate = next image down upgrade ladder
+    if none left → HALT, ask user
+    candidate = next_candidate
+    continue LOOP
+  else:
+    show Trivy block with ✅ CLEAR label
+    → image confirmed, proceed to Step 4
+```
 
 ---
 
@@ -435,23 +535,24 @@ docker-compose*
 
 ## Output Format
 
-When producing a Dockerfile:
-1. If Go was defaulted, state at the top: `> ℹ️ No language specified — using Go as the default backend language.`
-2. **Show the Image Upgrade Trail table** (Step 3c) — always, even if only one candidate was tried.
-3. **Show the CVE Check Results table** (Step 3b) — final confirmed images only.
-4. If any image went through substitution, show the 🚫 block notice before the Dockerfile.
-5. Show the complete Dockerfile using only CVE-confirmed images.
-6. Show the matching `.dockerignore`.
-7. Show the `docker build` command (including any `--secret` flags needed).
-8. Call out any other assumptions made about the user's stack.
-9. Note any trade-offs (e.g. why distroless was chosen over slim).
+When producing a Dockerfile — present blocks in this exact order:
+
+1. If Go was defaulted: `> ℹ️ No language specified — using Go as the default backend language.`
+2. **Trivy Scan blocks** (Step 3d) — one block per candidate tried, in loop order. Always shown, even if only one image was scanned and it was clean.
+3. **Image Upgrade Trail table** (Step 3c) — always shown, even if the first candidate was confirmed.
+4. If any image was substituted, show the 🚫 replacement notice.
+5. The complete Dockerfile using only Trivy-confirmed images, with inline comments.
+6. The matching `.dockerignore`.
+7. The `docker build` command (including any `--secret` flags).
+8. Any assumptions made about the stack.
+9. Trade-offs noted (e.g. why distroless was chosen over slim).
 
 When updating an existing Dockerfile:
-1. List issues found under each of the five pillars (including CVE findings).
-2. Show the Image Upgrade Trail for every image that was changed.
-3. Show the CVE Check Results table for all final confirmed images.
-4. Provide the rewritten Dockerfile.
-5. Summarize what changed and why.
+1. List issues found under each of the five pillars (including Trivy findings).
+2. Trivy scan blocks for all images — old images scanned to show before/after.
+3. Image Upgrade Trail for every image that changed.
+4. The rewritten Dockerfile.
+5. Summary of what changed and why.
 
 ---
 
