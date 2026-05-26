@@ -1,160 +1,98 @@
 ---
-name: debug-jenkins
-description: >-
-  Diagnose failed Jenkins builds in the dev-sec-ops lab using Jenkins MCP tools,
-  console logs, and pipeline context. Use when a Jenkins job fails, the user
-  shares a jenkins.tpinf.xyz build or console URL, asks why a pipeline failed,
-  or mentions devsecops-demo-pipeline, Trivy, Harbor, or SonarQube errors.
+name: jenkins-debug-skill
+description: Professional DevSecOps skill for debugging Jenkins CI/CD pipelines, Groovy DSL syntax errors, and containerized build environment failures.
+version: 1.0.0
+author: Senior DevSecOps Engineer
+tags:
+  - jenkins
+  - devsecops
+  - groovy
+  - cicd
+  - debugging
+  - mcp
 ---
 
-# Debug Jenkins Errors
+# Jenkins Pipeline Debugging Skill
 
-## Lab context
+Use this skill when a user asks to investigate, troubleshoot, or fix a failing Jenkins pipeline, analyze Jenkinsfile syntax, debug Groovy DSL errors, or isolate pipeline runtime environment bugs such as Kubernetes or Docker agent failures.
 
-| Item | Value |
-|------|--------|
-| Jenkins UI | https://jenkins.tpinf.xyz |
-| MCP server | `mcp-jenkins` in namespace `jenkins` (lanbaoshen/mcp-jenkins) |
-| MCP via Cursor | `user-litellm` tools prefixed `jenkins_mcp-` |
-| Demo pipeline | `jenkins/demo/Jenkinsfile` → job `devsecops-demo-pipeline` |
-| MCP credentials | `jenkins/mcpserver/secret.yaml` → must match `jenkins-values.yaml` admin password |
+## Capability Integration (MCP Setup)
 
-## Workflow
+Before parsing logs manually, checking for available Model Context Protocol (MCP) servers is mandatory:
+1. Jenkins MCP Server: If available, use tools like get_build_log, get_pipeline_node, or query_build_status to fetch the exact console output and pipeline structure.
+2. File System MCP: If debugging locally or via an attached workspace, use read_file to fetch the exact Jenkinsfile or shared library code instead of asking the user to paste it.
 
-Copy and track progress:
+---
 
-```
-- [ ] 1. Resolve job name + build number
-- [ ] 2. Fetch build metadata (result, duration, URL)
-- [ ] 3. Fetch console output (errors first, then tail)
-- [ ] 4. Identify failing stage + root cause
-- [ ] 5. Propose fix (Jenkinsfile, credentials, infra)
-- [ ] 6. Report to user
-```
+## The Jenkins Debug Mantra
 
-### Step 1: Parse the target
+When investigating a failure, the agent must follow these strict analytical steps:
 
-From a Jenkins URL, extract `fullname` and `number`:
+1. Isolate the Failure Layer: Determine if the crash is due to:
+   - Syntax or Parsing Error: Groovy CPS constraints, missing closures, invalid DSL keywords.
+   - Environment or Infrastructure Error: Jenkins Agent offline, Docker container pull failure, Kubernetes pod OOMKilled, missing tool definitions.
+   - Application or Build Error: Unit test failures, compilation errors, static analysis blockages.
+   - Security or Permission Error: Rejected sandbox signatures, missing credentials, Vault or Secrets fetch timeout.
 
-| URL pattern | fullname | number |
-|-------------|----------|--------|
-| `/job/devsecops-demo-pipeline/3/console` | `devsecops-demo-pipeline` | `3` |
-| `/job/folder/job/my-job/5/console` | `folder/my-job` | `5` |
+2. Verify over Guessing: Never guess syntax or variables. Cross-reference with standard Jenkins step definitions and Groovy specification.
 
-If only a job name is given, use `number: null` on console tool to get the **last** build.
+---
 
-### Step 2: MCP tools (preferred)
+## Core Reference Rules and Syntaxes
 
-Read tool schemas under `mcps/user-litellm/tools/jenkins_mcp-*.json` before calling.
+### 1. Safe Execution and Sandbox Approvals
+- Groovy in Jenkins runs inside a script security sandbox. Non-whitelisted methods (such as standard Java I/O or System.currentTimeMillis()) will throw a RejectedAccessException.
+- Fix Pattern: Advise the user to approve the signature in Manage Jenkins, then In-process Script Approval, or rewrite using Jenkins Native DSL alternatives (for example, use readFile instead of new File().text).
 
-**Always call first:**
+### 2. Built-in Environment and Context Variables
+Ensure all referenced global variables adhere to Jenkins rules:
+- env.BUILD_NUMBER (String): Current build sequence number.
+- currentBuild.currentResult: Valid values are SUCCESS, UNSTABLE, FAILURE, ABORTED.
+- params.YOUR_PARAM_NAME: Safely accesses pipeline parameter values.
 
-```
-jenkins_mcp-get_build
-  fullname: <job>
-  number: <build>   # omit for last build
-```
+### 3. Declarative vs Scripted Context
+- Do not mix Declarative structure (pipeline context) with raw Scripted code outside a script block.
+- Environment block constraint: In Declarative Jenkins, variables assigned inside an environment block cannot dynamically evaluate shell script execution results unless using the sh(returnStdout: true) pattern correctly wrapped in a string interpolation.
 
-**Then console:**
+---
 
-```
-jenkins_mcp-get_build_console_output
-  fullname: <job>
-  number: <build>
-  pattern: "ERROR|FATAL|FAILURE|Exception|error:|failed|UNAUTHORIZED|denied|not found"
-  limit: 60
-```
+## Actionable Debugging Workflows
 
-If the failure is unclear, fetch the tail (no pattern, use `offset` on a second call or increase `limit`).
+### Phase 1: Context Gathering (Discovery and Diagnostics)
+If the user provides an error, run these diagnostic validations:
 
-**Optional:**
+```groovy
+// 1. Check for the common "CPS transformation" issue when using non-serializable objects (e.g., Iterators, Regex Matchers)
+@NonCPS
+def parseDataWithRegex(String text) {
+    // Non-serializable logic must be isolated inside a @NonCPS annotated method
+    def matcher = text =~ /pattern/
+    return matcher ? matcher[0] : null
+}
 
-| Need | Tool |
-|------|------|
-| Parameters used | `jenkins_mcp-get_build_parameters` |
-| Test failures | `jenkins_mcp-get_build_test_report` |
-| Compare prior build | `jenkins_mcp-get_build` with `number - 1` |
-| Re-run | `jenkins_mcp-build_item` (confirm with user first) |
-| Running builds | `jenkins_mcp-get_running_builds` |
-
-### Step 3: Map console → stage
-
-Match log markers to `jenkins/demo/Jenkinsfile` stages:
-
-| Stage | Log / container clues |
-|-------|------------------------|
-| Clone Repository | `git`, `checkout` |
-| Install Dependencies | `container('nodejs')`, `npm ci` |
-| Run Tests | `npm test` |
-| SonarQube Analysis | `sonar-scanner`, `SONAR_TOKEN` |
-| Import SonarQube to DefectDojo | `import-scan`, `SONARQUBE IMPORT` |
-| Build Container Image | `container('docker-cli')`, `docker build`, `IMAGE_NAME` |
-| Vulnerability Scan | `container('trivy')`, `trivy image` |
-| Push Image to Harbor | `docker login`, `docker push`, `PUSH_TO_HARBOR` |
-| Import Scan to DefectDojo | `Trivy Scan`, `IMPORT_TO_DEFECTDOJO` |
-
-### Step 4: Common failures in this repo
-
-See [failures.md](failures.md) for patterns and fixes. Quick hits:
-
-- **Trivy `No such image` / `project my-project not found`**: `Vulnerability Scan` uses hardcoded `my-project` but `environment` uses `REGISTRY_PROJECT = 'lab'` and `IMAGE_NAME` for the build — image name mismatch. Fix Jenkinsfile line ~232 to use `${IMAGE_NAME}` or `${REGISTRY_URL}/${REGISTRY_PROJECT}/...`.
-- **Harbor UNAUTHORIZED**: Wrong project name, missing `harbor-credentials`, or image never pushed (`PUSH_TO_HARBOR` false).
-- **SonarQube auth**: Check Jenkins credential id `sonar` and SonarCloud token.
-- **DefectDojo import**: Check `defectdojo-api-token`, engagement id, pod reachability `defectdojo-django.defectdojo.svc`.
-- **Agent pod stuck**: `ContainersNotReady`, image pull errors — check `jenkins_mcp-get_build_console_output` pod YAML section.
-- **npm / tests**: Missing `package.json` scripts or network to registry.
-
-Always read the actual `Jenkinsfile` in the repo before suggesting edits — jobs may differ from the demo.
-
-### Step 5: Fallbacks if MCP fails
-
-1. Confirm MCP pod: `kubectl get pods -n jenkins -l app.kubernetes.io/name=mcp-jenkins`
-2. Check MCP logs: `kubectl logs -n jenkins deploy/mcp-jenkins --tail=50`
-3. Verify secret matches Jenkins admin password (`jenkins/mcpserver/secret.yaml`)
-4. Jenkins API (lab): `curl -s -u admin:<password> "https://jenkins.tpinf.xyz/job/<job>/<build>/consoleText" | tail -80`
-
-Do not guess passwords; use repo docs or ask the user.
-
-## Report template
-
-```markdown
-## Jenkins build failure
-
-**Job:** <fullname> #<number>
-**URL:** <build url>
-**Result:** <SUCCESS|FAILURE|UNSTABLE|ABORTED>
-**Duration:** <duration>
-
-### Failing stage
-<stage name>
-
-### Error excerpt
-```
-<3–15 relevant log lines>
+// 2. Validate conditional blocks inside Declarative Pipeline
+stage('Deploy') {
+    when {
+        expression { return params.DEPLOY_ENV == 'production' } // Ensure 'return' keyword is inside expression closure
+    }
+    steps {
+        echo "Deploying..."
+    }
+}
 ```
 
-### Root cause
-<one clear sentence>
+### Phase 2: Root Cause Analysis (RCA) Guide
 
-### Recommended fix
-1. <actionable step>
-2. <optional step>
+| Error Signature | Potential Root Cause | Verified Resolution Pattern |
+| :--- | :--- | :--- |
+| java.io.NotSerializableException | Using non-serializable Java objects within normal pipeline steps across serialization checkpoints. | Move the logic into a helper method marked with @NonCPS. |
+| org.jenkinsci.plugins...NoSuchMethodError | Mismatch between pipeline syntax and installed plugin version, or invalid syntax inside declarative stage. | Change the step keyword to match the exact plugin documentation or wrap scripted segments inside a script block. |
+| WorkflowScript: Method closures not supported | Declaring a dynamic closure or function inside a declarative steps block without a script wrapper. | Encapsulate the function in a Jenkins Shared Library or inside a script block. |
+| Exit code 137 | Container agent or build step was killed by the OS or Kernel due to Out of Memory. | Increase the memory request or limit in the Kubernetes pod template or Docker resource allocation parameters. |
 
-### Files to check
-- `jenkins/demo/Jenkinsfile` (or job's actual script path)
-- <credentials / harbor / sonar as needed>
-```
-
-## Rules
-
-- Use MCP tools first; do not ask the user to paste the full console if MCP works.
-- Quote real log lines; do not invent errors.
-- Distinguish **symptom** (e.g. Trivy exit 1) from **root cause** (wrong image name in Jenkinsfile).
-- Propose minimal Jenkinsfile/config fixes; do not refactor unrelated stages.
-- For `build_item` or `stop_build`, confirm with the user before running.
-
-## Additional resources
-
-- Failure pattern reference: [failures.md](failures.md)
-- Pipeline source: `jenkins/demo/Jenkinsfile`
-- MCP deployment: `jenkins/mcpserver/`
+### Phase 3: Fix Verification Protocol
+Before returning any fixed Jenkinsfile code snippet to the user, the agent must check:
+- Is every opening brace balanced with a corresponding closing brace?
+- Are pipeline parameters accessed via params.NAME instead of just NAME to avoid variable scoping conflicts?
+- If the block is within a declarative pipeline, are shell executions placed exclusively inside a steps block, or wrapped inside script block if complex logic is required?
+- Are string variables utilizing double quotes if Groovy string interpolation (${env.VARIABLE}) is needed? Single quotes must be used for literal strings only.
