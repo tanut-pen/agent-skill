@@ -1,14 +1,23 @@
 ---
-name: new-service-deployment
+name: devsecops-newservice
 description: >-
-  Scaffold a new service in the dev-sec-ops lab: Helm chart + Argo CD app-list
-  entry, or Kustomize manifests + app-list entry. Puts Ingress and shared static
-  config under static/. Uses secret.yaml (gitignored) for Kustomize secrets.
-  Use when adding a new tool, app, deployment, Helm release, or Argo CD
-  Application to this repository.
+  Scaffold a new service in the dev-sec-ops lab. Use when the user says: "add a
+  new service", "deploy a new app", "add a Helm chart", "create a new Argo CD
+  Application", "onboard a new tool", "set up a new deployment", or any request
+  to add a new workload to the lab cluster. Outputs: service directory files,
+  Helm values or Kustomize manifests, Argo CD app-list entry, and static/
+  Ingress. Handles both Helm-based (Path A) and Kustomize-based (Path B)
+  services. Triggered even if user doesn't say "Helm" or "Argo CD" explicitly.
 ---
 
 # New Service Deployment
+
+## Overview
+
+This skill scaffolds a complete new service in the `dev-sec-ops` lab. It
+determines whether to use **Path A (Helm + dual-source Argo CD)** or
+**Path B (Kustomize + single-source Argo CD)**, creates all required files,
+appends an entry to `argocd/app-list.yaml`, and adds Ingress under `static/`.
 
 ## Decision tree
 
@@ -247,6 +256,30 @@ kubectl get applications -n argocd | grep <name>
 - Commit `secret.yaml` or real credentials in values files.
 - Create duplicate Argo apps for `static/` — it is already managed.
 - Use `prune: true` on stateful Helm apps without user confirmation if data loss risk exists.
+
+---
+
+## Examples
+
+**Example 1 — Helm-based service (Path A)**
+
+> User: "Add Grafana to the lab using its Helm chart."
+
+Outcome:
+- `grafana/grafana-values.yaml` with `ingress.enabled: false`, `NodePort`
+- `grafana/install.sh` with `helm repo add grafana https://grafana.github.io/helm-charts`
+- Argo CD Application appended to `argocd/app-list.yaml` (dual-source)
+- `static/grafana-ingress.yaml` with host `grafana.tpinf.xyz`
+
+**Example 2 — Kustomize-based service (Path B)**
+
+> User: "Set up a new custom app called myapp with a Docker image myorg/myapp:latest."
+
+Outcome:
+- `myapp/kustomization.yaml`, `myapp/deployment.yaml`, `myapp/install.sh`
+- `myapp/secret.yaml.example` if env vars needed
+- Argo CD Application appended to `argocd/app-list.yaml` (single-source)
+- Entry in `static/ingress.yaml` for `myapp.tpinf.xyz`
 
 ---
 
