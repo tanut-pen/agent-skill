@@ -531,6 +531,31 @@ docker-compose*
 
 ## Output Format
 
+### Final Delivery (In-Chat Table Report)
+Once the loop is complete and Step 3 returns an exit code of 0, YOU MUST present a summary report directly in the chat using Markdown tables. Do not just say the task is done.
+
+1. Overall Status Table:
+Create a summary table showing the final scan state:
+
+| Metric | Status / Value |
+| :--- | :--- |
+| Final Base Image | [Specify the final base image used, e.g., alpine:3.19.1] |
+| HIGH Vulnerabilities | 0 |
+| CRITICAL Vulnerabilities | 0 |
+| Build & Scan Status | SUCCESS |
+
+2. Remediation Action Table:
+Create a table detailing exactly which packages were modified or upgraded to achieve the zero-vulnerability state based on the Trivy findings:
+
+| Package / Library | Original Version | Upgraded Version | Fixed Vulnerabilities |
+| :--- | :--- | :--- | :--- |
+| [e.g., libcrypto3] | [e.g., 3.0.11-r1] | [e.g., 3.0.13-r0] | [e.g., CVE-2023-xxxx, CVE-2024-xxxx] |
+
+*(Note: If the initial scan passed with 0 vulnerabilities and no packages needed upgrading, explicitly state: "No package upgrades were required.")*
+
+3. Final Dockerfile Output:
+After presenting the tables, output the final, validated `Dockerfile` inside a standard markdown code block so the user can copy it directly.
+
 When producing a Dockerfile — present blocks in this exact order:
 
 1. If Go was defaulted: `> ℹ️ No language specified — using Go as the default backend language.`
