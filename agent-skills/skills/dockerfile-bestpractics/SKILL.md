@@ -480,10 +480,6 @@ COPY --from=builder /app/server /app/server
 # 6. Prefer ENTRYPOINT + CMD over CMD alone
 ENTRYPOINT ["/app/server"]
 CMD ["--port", "8080"]
-
-# 7. Metadata labels
-LABEL org.opencontainers.image.source="https://github.com/org/repo"
-LABEL org.opencontainers.image.revision="<git-sha>"
 ```
 
 ---
